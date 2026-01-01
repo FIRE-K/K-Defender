@@ -177,10 +177,10 @@ K-Defender интегрируется напрямую в обработчики
 
 ```json
 {
-  "SQLi": [
+  "SQLi": {
     "patterns": ["' OR 1=1", "UNION SELECT"],
     "risk": 100
-  ]
+  }
 }
 ```
 
