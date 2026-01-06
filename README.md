@@ -147,7 +147,7 @@ pip install kdefender-wrapper
 
 Краткая документация: https://pypi.org/project/kdefender-wrapper/
 
-Исходный код представлен в файле kdefender_wrapper_local.py (в имени файла указано local для избежания дублиования имени файла и модуля)
+Исходный код представлен в файле kdefender_wrapper_local.py (в имени файла указано local для избежания дублирования имени файла и модуля)
 
 ### Минимальный пример (Telegram-бот)
 
