@@ -24,6 +24,9 @@ SIG_FILE = "signatures.json"
 _autosave_task = None
 logs_num = logs_num_save = 100
 
+DRAFT_BOT_KEY = "new_bot"   # temp bot slot name while connecting (must be not a num, not to be same as bot_id)
+
+
 async def autosave_loop():
     while True:
         await asyncio.sleep(30)
@@ -32,11 +35,13 @@ async def autosave_loop():
         except Exception:
             pass
 
+
 def _atomic_write_json(path: str, data: Any) -> None:
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
     os.replace(tmp, path)
+
 
 def load_json(path: str, default: Any) -> Any:
     if not os.path.exists(path):
@@ -49,8 +54,10 @@ def load_json(path: str, default: Any) -> Any:
     except Exception:
         return default
 
+
 def save_state() -> None:
     _atomic_write_json(STATE_FILE, state)
+
 
 state = load_json(STATE_FILE, {})      # user_id(str) -> data
 signatures = load_json(SIG_FILE, {
@@ -62,7 +69,7 @@ signatures = load_json(SIG_FILE, {
         "patterns": ["<script", "onerror=", "onload=", "javascript:", "<img", "<iframe"],
         "risk": 80
     }
-}) # type → commands
+})  # type → commands
 
 DEFAULT_BOT_SETTINGS = {
     "SQLi": True,
@@ -76,29 +83,73 @@ DEFAULT_BOT_SETTINGS = {
     "Flood": True,
 }
 
-def get_bot_settings(user_id: int, bot_id: int) -> dict:
-    u = state.setdefault(str(user_id), {})
-    bots = u.setdefault("bots", {})
-    b = bots.setdefault(str(bot_id), {})
-    st = b.setdefault("settings", {})
-    for k, v in DEFAULT_BOT_SETTINGS.items():
-        st.setdefault(k, v)
-    return st
-
 DEFAULT_USER_SETTINGS = {
     "enabled": True,
     "strict": False,
     "mode": "normal"      # normal / allow_all / block_all
 }
 
-def get_user_settings(user_id: int) -> dict:
+
+# ---------------- STATE HELPERS ----------------
+def ensure_user(user_id: int | str) -> dict:
     u = state.setdefault(str(user_id), {})
+    u.setdefault("bots", {})
+    u.setdefault("settings", {})
+    return u
+
+
+def bots_of(user_id: int | str) -> dict:
+    return ensure_user(user_id)["bots"]
+
+
+def ensure_draft(user_id: int | str, reset: bool = False) -> dict:
+    bots = bots_of(user_id)
+    if reset or DRAFT_BOT_KEY not in bots:
+        bots[DRAFT_BOT_KEY] = {
+            "step": 1,
+            "verified": False,
+            "instr_page": 0,
+            "settings": {},
+        }
+    return bots[DRAFT_BOT_KEY]
+
+
+def drop_draft(user_id: int | str) -> None:
+    bots_of(user_id).pop(DRAFT_BOT_KEY, None)
+
+
+def ensure_bot(user_id: int | str, bot_id: int | str) -> dict:
+    bots = bots_of(user_id)
+    b = bots.setdefault(str(bot_id), {})
+    b.setdefault("step", 1)
+    b.setdefault("verified", False)
+    b.setdefault("instr_page", 0)
+    b.setdefault("settings", {})
+    return b
+
+
+def real_bots_dict(user_id: int | str) -> dict:
+    bots = bots_of(user_id)
+    return {k: v for k, v in bots.items() if k != DRAFT_BOT_KEY}
+
+
+def get_bot_settings(user_id: int, bot_id: int | str) -> dict:
+    b = ensure_bot(user_id, bot_id)
+    st = b.setdefault("settings", {})
+    for k, v in DEFAULT_BOT_SETTINGS.items():
+        st.setdefault(k, v)
+    return st
+
+
+def get_user_settings(user_id: int) -> dict:
+    u = ensure_user(user_id)
     st = u.setdefault("settings", {})
     for k, v in DEFAULT_USER_SETTINGS.items():
         st.setdefault(k, v)
     return st
 
-def reset_bot_token(user_id: int, bot_id: int) -> str:
+
+def reset_bot_token(user_id: int, bot_id: int | str) -> str:
     u = state.get(str(user_id))
     if not u:
         raise ValueError("User not found")
@@ -118,13 +169,6 @@ def reset_bot_token(user_id: int, bot_id: int) -> str:
     save_state()
     return new_token
 
-# Structure of signatures.json
-# {
-#   "SQLi": {
-#     "patterns": ["' OR 1=1", "UNION SELECT"],
-#     "risk": 100
-#   }
-# }
 
 # ---------------- SECURITY FUNCTIONS ----------------
 def detect_inj(text, inj, user_state, sender):
@@ -135,6 +179,7 @@ def detect_inj(text, inj, user_state, sender):
     if not sig:
         return False
     return any(x in text.lower() for x in sig.get("patterns", []))
+
 
 def get_risk_score(inj_arr):
     global signatures
@@ -148,6 +193,7 @@ def get_risk_score(inj_arr):
         score += int(sig.get("risk", 0))
     return score
 
+
 def detect_flood(user_state, sender):
     t = time.time()
     logs = user_state.setdefault("Flood", {})
@@ -157,21 +203,22 @@ def detect_flood(user_state, sender):
     logs[sender].append(t)
     return len(logs[sender]) > 5
 
+
 # ---------------- Instruction pages ----------------
 setup_pages = [
     "<b>K-Defender Setup — Step 1</b>\n\nCreate a private group in Telegram. Name it something like \"K-Defender Security\".",
-    "<b>K-Defender Setup — Step 2</b>\n\nAdd the K-Defender bot to the group (search @kdefender_bot) and also add the bot you want to protect to the same group.",
-    "<b>K-Defender Setup — Step 3</b>\n\nSet your protected bot's permissions: allow it to read messages in the group (Admin → Edit Permissions → Read Messages).",
-    "<b>K-Defender Setup — Step 4</b>\n\nSend the GROUP ID to me (paste the numeric ID here), or press \"Detect automatically\" in the group later.\n\nIf you don't know how to get the GROUP ID, press the \"How to get group ID\" button.",
+    "<b>K-Defender Setup — Step 2</b>\n\nAdd the K-Defender bot to the group (search @kdefender_bot).",
+    "<b>K-Defender Setup — Step 4</b>\n\nSend the GROUP ID to me (paste the numeric ID here).\n\nIf you don't know how to get the GROUP ID, press the \"How to get group ID\" button.",
     "<b>K-Defender Setup — Step 5</b>\n\nAfter we have the GROUP ID: go to your protected bot and send in the group: <code>/connect</code>."
 ]
 
 get_id_pages = [
     "<b>How to get Group ID — Step 1</b>\n\nOpen the group (on desktop or mobile).",
     "<b>How to get Group ID — Step 2</b>\n\nUse this bot (add it to group --&gt; write <code>/get_info</code> to it and it'll give chat info).",
-    "<b>How to get Group ID — Step 3</b>\n\nYou can use @getidsbot instead (add it to group --&gt; it'll give group info. After getting Group ID you can delete this bot).",
+    "<b>How to get Group ID — Step 3</b>\n\nYou can use info getting bots, but be careful!.",
     "<b>How to get Group ID — Final</b>\n\nGroup IDs for supergroups are usually negative numbers (e.g. -1001234567890). Paste that exact numeric ID to me."
 ]
+
 
 def make_nav_kb(flow="setup", index=0):
     kb = []
@@ -183,7 +230,6 @@ def make_nav_kb(flow="setup", index=0):
             kb_row.append(InlineKeyboardButton(text="⬅ Prev", callback_data=prev_data))
         if index < len(setup_pages) - 1:
             kb_row.append(InlineKeyboardButton(text="Next ➡", callback_data=next_data))
-        # add helper button
         kb_row.append(InlineKeyboardButton(text="How to get group ID", callback_data="open_getid:0"))
         kb.append(kb_row)
         kb.append([InlineKeyboardButton(text="Cancel", callback_data="cancel_setup")])
@@ -199,6 +245,7 @@ def make_nav_kb(flow="setup", index=0):
         kb.append(kb_row)
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
+
 # ============================================================
 # ================= BOT API HANDLERS =========================
 # ============================================================
@@ -206,11 +253,15 @@ def make_nav_kb(flow="setup", index=0):
 async def edit_msg(msg: Message, text: str, reply_markup=None, parse_mode=ParseMode.HTML):
     await msg.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
 
+
 @dp.message(Command("start"))
 async def start_cmd(msg: Message):
     user_id = msg.from_user.id
-    if str(user_id) not in state:
-        state[str(user_id)] = {"step": 1, "verified": False, "instr_page": 0}
+    is_new = str(user_id) not in state
+    ensure_user(user_id)
+    save_state()
+
+    if is_new:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="➕ Start binding", callback_data="bind_start")]
         ])
@@ -230,14 +281,17 @@ async def start_cmd(msg: Message):
             reply_markup=kb
         )
 
+
 @dp.message(Command("menu"))
 async def menu_cmd_handler(msg: Message):
     msg = await msg.answer("Loading...")
     await menu_cmd(msg)
 
+
 @dp.callback_query(F.data == "menu")
 async def menu_callback_handler(call: CallbackQuery):
     await menu_cmd(call.message)
+
 
 async def menu_cmd(msg: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -254,11 +308,12 @@ async def menu_cmd(msg: Message):
         reply_markup=kb
     )
 
+
 @dp.callback_query(F.data == "stats")
 async def stats_panel(call: CallbackQuery):
     user = str(call.from_user.id)
-    s = state.get(user) or {}
-    bots = (s.get("bots") or {})
+    ensure_user(user)
+    bots = real_bots_dict(user)
 
     total_bots = len(bots)
     total_msgs = 0
@@ -281,11 +336,12 @@ async def stats_panel(call: CallbackQuery):
         parse_mode=ParseMode.HTML
     )
 
+
 @dp.callback_query(F.data == "activity")
 async def activity_panel(call: CallbackQuery):
     user = str(call.from_user.id)
-    s = state.get(user) or {}
-    bots = (s.get("bots") or {})
+    ensure_user(user)
+    bots = real_bots_dict(user)
 
     items = []
     for b in bots.values():
@@ -293,7 +349,7 @@ async def activity_panel(call: CallbackQuery):
         for t in (b.get("logs") or [])[-20:]:
             items.append((name, t))
 
-    items = items[-15:]  # show last 15 total
+    items = items[-15:]
     if not items:
         text = "<b>🧾 Recent activity</b>\n\nNo messages checked yet."
     else:
@@ -301,7 +357,7 @@ async def activity_panel(call: CallbackQuery):
         for name, t in items:
             short = (t[:80] + "…") if len(t) > 80 else t
             lines.append(f"• <code>@{name}</code>: {html.escape(short)}")
-        text = "<b>🧾 Recent activity</b>\n\nText|Normalized|Score|Reason" + "\n".join(lines)
+        text = "<b>🧾 Recent activity</b>\n\nText|Normalized|Score|Reason\n" + "\n".join(lines)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅ Back", callback_data="menu")]
@@ -309,14 +365,17 @@ async def activity_panel(call: CallbackQuery):
 
     await call.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
+
 @dp.message(Command("help"))
 async def help_cmd_handler(msg: Message):
     msg = await msg.answer("Loading...")
     await help_cmd(msg)
 
+
 @dp.callback_query(F.data == "help")
 async def help_callback_handler(call: CallbackQuery):
     await help_cmd(call.message)
+
 
 async def help_cmd(msg: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -331,12 +390,19 @@ async def help_cmd(msg: Message):
         "• <b>My bots</b> — see your protected bots\n"
         "• <b>Stats</b> — how many messages were checked/blocked\n"
         "• <b>Recent activity</b> — latest checked messages\n"
-        "• <b>Settings</b> — turn protection types on/off\n\n",
+        "• <b>Settings</b> — turn protection types on/off\n\n"
+        "Commands:\n"
+        "• <code>/start</code> — start or restart the bot\n"
+        "• <code>/menu</code> — open the main menu\n"
+        "• <code>/get_info</code> — get info about a chat\n"
+        "• <code>/help</code> — show this help message\n",
         reply_markup=kb
     )
 
+
 def _onoff(v: bool) -> str:
     return "✅ ON" if v else "❌ OFF"
+
 
 def _mode_label(mode: str) -> str:
     return {
@@ -344,6 +410,7 @@ def _mode_label(mode: str) -> str:
         "allow_all": "Allow All (pause protection)",
         "block_all": "Block All (lockdown)",
     }.get(mode, mode)
+
 
 def settings_kb(user_id: int) -> InlineKeyboardMarkup:
     st = get_user_settings(user_id)
@@ -354,6 +421,7 @@ def settings_kb(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"🧯 Mode: {_mode_label(st['mode'])}", callback_data="set:mode")],
         [InlineKeyboardButton(text="⬅ Back", callback_data="menu")]
     ])
+
 
 def settings_text(user_id: int) -> str:
     st = get_user_settings(user_id)
@@ -375,6 +443,7 @@ def settings_text(user_id: int) -> str:
         "• <b>Mode</b>: emergency switch\n"
     )
 
+
 @dp.callback_query(F.data == "settings")
 async def settings_callback_handler(call: CallbackQuery):
     uid = call.from_user.id
@@ -385,6 +454,7 @@ async def settings_callback_handler(call: CallbackQuery):
         disable_web_page_preview=True
     )
     await call.answer()
+
 
 @dp.callback_query(F.data.startswith("set:"))
 async def settings_click(call: CallbackQuery):
@@ -412,6 +482,7 @@ async def settings_click(call: CallbackQuery):
     )
     await call.answer("Saved ✅")
 
+
 @dp.message(Command("get_info"))
 async def get_info_cmd(msg: types.Message):
     if msg.reply_to_message:
@@ -436,64 +507,78 @@ async def get_info_cmd(msg: types.Message):
  └ type: {c.type}"""
     )
 
+
 @dp.callback_query(F.data == "bots_info")
 async def bots_info(call: CallbackQuery):
-    global state
+    ensure_user(call.from_user.id)
+
     btn_arr = []
-    for bot_id, data in state.get(str(call.from_user.id), {}).get("bots", {}).items():
+    for bot_id, data in real_bots_dict(call.from_user.id).items():
+        uname = data.get("bot_username")
+        if not uname:
+            continue
         btn_arr.append(
             InlineKeyboardButton(
-                text=f"@{data['bot_username']}",
-                callback_data=f"bot_{data['bot_username']}"
+                text=f"@{uname}",
+                callback_data=f"bot_{uname}"
             )
         )
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        btn_arr,
-        [InlineKeyboardButton(text="Add Bot", callback_data="bind_start")],
-        [InlineKeyboardButton(text="⬅ Back", callback_data="menu")]
-    ])
-    message = '\nNo bots connected. Add one by pressing the button below.' if btn_arr == [] else ''
+    rows = []
+    if btn_arr:
+        rows.append(btn_arr)
+
+    rows.append([InlineKeyboardButton(text="Add Bot", callback_data="bind_start")])
+    rows.append([InlineKeyboardButton(text="⬅ Back", callback_data="menu")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+    message = "\nNo bots connected. Add one by pressing the button below." if not btn_arr else ""
 
     await call.message.edit_text(
         f"<code>Bots Info</code>{message}",
         reply_markup=kb
     )
 
-# ================= ADDED BOT CONTROL PANEL ====================
 
 @dp.callback_query(F.data.startswith("botset_"))
 async def bot_settings_toggle(call: CallbackQuery):
     global DEFAULT_BOT_SETTINGS
     bot_username, setting = call.data.split(":")
     bot_username = '_'.join(bot_username.split("_")[1:])
-    
-    for uid, s in state[str(call.from_user.id)]["bots"].items():
-        if s.get("bot_username") == bot_username:
-            s.setdefault("settings", DEFAULT_BOT_SETTINGS)
-            s["settings"][setting] = not s["settings"][setting]
-            
-            await call.answer(f"{setting.upper()} → {'ON' if s['settings'][setting] else 'OFF'}", show_alert=False)
-            return await show_bot_panel(call.message, s, uid)
+
+    # Find bot record by username (skip draft)
+    for bid, b in real_bots_dict(call.from_user.id).items():
+        if b.get("bot_username") == bot_username:
+            st = b.setdefault("settings", {})
+            for k, v in DEFAULT_BOT_SETTINGS.items():
+                st.setdefault(k, v)
+
+            st[setting] = not st.get(setting, False)
+
+            save_state()
+            await call.answer(f"{setting.upper()} → {'ON' if st[setting] else 'OFF'}", show_alert=False)
+            return await show_bot_panel(call.message, b, bid)
 
     await call.answer("Bot not found", show_alert=True)
+
 
 @dp.callback_query(F.data.startswith("botlogs_"))
 async def bot_show_logs(call: CallbackQuery):
     bot_username = '_'.join(call.data.split("_")[1:])
 
-    # Find bot record
-    s = None
-    for uid, data in state[str(call.from_user.id)]["bots"].items():
+    b = None
+    bid = None
+    for _bid, data in real_bots_dict(call.from_user.id).items():
         if data.get("bot_username") == bot_username:
-            s = data
+            b = data
+            bid = _bid
             break
 
-    if not s:
+    if not b:
         return await call.answer("Bot not found", show_alert=True)
 
     global logs_num
-    logs = s.get("logs", [])[-logs_num:]
+    logs = b.get("logs", [])[-logs_num:]
     if not logs:
         text = f"<b>@{bot_username} — No logs yet.</b>"
     else:
@@ -507,18 +592,19 @@ async def bot_show_logs(call: CallbackQuery):
 
     await call.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
+
 def get_bot_stats(user_id, bot_username):
-    s = None
-    for uid, data in state[str(user_id)]["bots"].items():
+    b = None
+    for _, data in real_bots_dict(user_id).items():
         if data.get("bot_username") == bot_username:
-            s = data
+            b = data
             break
 
-    if not s:
+    if not b:
         return "Not found"
 
-    total = int(s.get("stats_total", 0))
-    blocked = int(s.get("stats_blocked", 0))
+    total = int(b.get("stats_total", 0))
+    blocked = int(b.get("stats_blocked", 0))
     allowed = max(total - blocked, 0)
 
     blocked_pct = int((blocked / total) * 100) if total else 0
@@ -532,21 +618,23 @@ def get_bot_stats(user_id, bot_username):
         "allowed_pct": allowed_pct,
     }
 
+
 def make_bar(label: str, percent: int, size: int = 12):
     filled = int((percent / 100) * size)
     empty = size - filled
     return f"{label} [{'█' * filled}{'░' * empty}] {percent}%"
 
+
 def bot_stats_text(user_id, bot_username):
     b = None
-    for uid, data in state[str(user_id)]["bots"].items():
+    for _, data in real_bots_dict(user_id).items():
         if data.get("bot_username") == bot_username:
             b = data
             break
 
     if not b:
         return "Not found"
-    
+
     stats = get_bot_stats(user_id, bot_username)
     if stats == "Not found":
         return "Not found"
@@ -567,6 +655,7 @@ def bot_stats_text(user_id, bot_username):
         f"ℹ️ <i>Blocked messages were detected as suspicious.\n"
         f"Allowed messages passed security checks.</i>"
     )
+
 
 @dp.callback_query(F.data.startswith("botstats_"))
 async def bot_stats_handler(call: CallbackQuery):
@@ -590,21 +679,26 @@ async def bot_stats_handler(call: CallbackQuery):
     )
     await call.answer()
 
+
 def delete_bot(user_id, bot_id):
     u = state.get(str(user_id))
     if not u:
         return False
     bots = u.get("bots", {})
+    if str(bot_id) == DRAFT_BOT_KEY:
+        return False
     bots.pop(str(bot_id), None)
     save_state()
     return True
 
+
 async def show_bot_panel(msg, bot_state, bot_id):
     global DEFAULT_BOT_SETTINGS
-    bot_username = bot_state.get("bot_username")
-    settings = bot_state.setdefault("settings", DEFAULT_BOT_SETTINGS)
+    bot_username = bot_state.get("bot_username") or "unknown"
+    settings = bot_state.setdefault("settings", {})
+    for k, v in DEFAULT_BOT_SETTINGS.items():
+        settings.setdefault(k, v)
 
-    # Stats
     total = bot_state.get("stats_total", 0)
     blocked = bot_state.get("stats_blocked", 0)
     allowed = total - blocked
@@ -657,6 +751,7 @@ async def show_bot_panel(msg, bot_state, bot_id):
 
     await msg.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
+
 @dp.callback_query(F.data.startswith("botresettoken_"))
 async def bot_reset_token_confirm(call: CallbackQuery):
     bot_info = ''.join(call.data.split("_", 1)[1])
@@ -680,6 +775,7 @@ async def bot_reset_token_confirm(call: CallbackQuery):
         parse_mode="HTML"
     )
     await call.answer()
+
 
 @dp.callback_query(F.data.startswith("botresettokenyes_"))
 async def bot_reset_token_apply(call: CallbackQuery):
@@ -710,8 +806,9 @@ async def bot_reset_token_apply(call: CallbackQuery):
     )
     await call.answer("Token reset")
 
+
 @dp.callback_query(F.data.startswith("botdelete_"))
-async def bot_reset_token_confirm(call: CallbackQuery):
+async def bot_delete_confirm(call: CallbackQuery):
     bot_info = ''.join(call.data.split("_", 1)[1])
     bot_id = bot_info.split("|", 1)[0]
     bot_username = bot_info.split("|", 1)[1]
@@ -726,19 +823,20 @@ async def bot_reset_token_confirm(call: CallbackQuery):
     await call.message.edit_text(
         "<b>🗑 Delete bot?</b>\n\n"
         "This will immediately delete this bot from protection.\n\n"
-        "Rewrite (delete <code>setup()</code> and <code>close()</code> lines and wrappers -- <code>@kdefender_check()</code>) and restart your bot.\nK-Defender protection will be deleted for it.\n"
+        "Rewrite (delete <code>setup()</code> and <code>close()</code> lines and wrappers -- <code>@kdefender_check()</code>) and restart your bot.\n"
+        "K-Defender protection will be deleted for it.\n\n"
         "Are you sure?",
         reply_markup=kb,
         parse_mode="HTML"
     )
     await call.answer()
 
+
 @dp.callback_query(F.data.startswith("botdeleteyes_"))
-async def bot_reset_token_apply(call: CallbackQuery):
+async def bot_delete_apply(call: CallbackQuery):
     user_id = call.from_user.id
     bot_info = ''.join(call.data.split("_", 1)[1])
     bot_id = bot_info.split("|", 1)[0]
-    bot_username = bot_info.split("|", 1)[1]
 
     try:
         delete_bot(user_id, bot_id)
@@ -756,16 +854,17 @@ async def bot_reset_token_apply(call: CallbackQuery):
     )
     await call.answer("Bot deleted")
 
+
 @dp.callback_query(F.data.startswith("bot_"))
 async def bot_info(call: CallbackQuery):
     bot_username = '_'.join(call.data.split("_")[1:])
     bot_state = None
-    bot_id = 0
+    bot_id = None
 
-    for uid, s in state[str(call.from_user.id)]["bots"].items():
-        if s.get("bot_username") == bot_username:
-            bot_state = s
-            bot_id = uid
+    for bid, b in real_bots_dict(call.from_user.id).items():
+        if b.get("bot_username") == bot_username:
+            bot_state = b
+            bot_id = bid
             break
 
     if not bot_state:
@@ -773,38 +872,42 @@ async def bot_info(call: CallbackQuery):
 
     return await show_bot_panel(call.message, bot_state, bot_id)
 
+
 @dp.callback_query(F.data == "bind_start")
 async def bind_start(call: CallbackQuery):
-    user = str(call.from_user.id)
-    s = state.setdefault(user, {"step": 1, "verified": False, "instr_page": 0})
-    s["step"] = 2
-    s["instr_page"] = 0
-    s["verified"] = False
+    uid = call.from_user.id
+    nb = ensure_draft(uid, reset=True)
+    nb["step"] = 2
+    nb["instr_page"] = 0
+    nb["verified"] = False
     save_state()
+
     await call.message.edit_text(
         setup_pages[0],
         reply_markup=make_nav_kb("setup", 0),
         parse_mode=ParseMode.HTML
     )
 
-# navigation callbacks for setup pages
+
 @dp.callback_query(
     F.data.in_(["open_getid:0", "cancel_setup"]) |
     F.data.startswith(("setup_next:", "setup_prev:", "open_setup:"))
 )
 async def setup_nav(call: CallbackQuery):
-    user = str(call.from_user.id)
-    s = state.setdefault(user, {"step": 2, "verified": False, "instr_page": 0})
+    uid = call.from_user.id
+    nb = ensure_draft(uid, reset=False)
     data = call.data
 
     if data == "cancel_setup":
-        s["step"] = 1
+        drop_draft(uid)
+        save_state()
         await call.message.edit_text("Setup cancelled. Send /start to begin again.")
         return
 
     if data.startswith("open_setup:"):
         idx = int(data.split(":", 1)[1])
-        s["instr_page"] = idx
+        nb["instr_page"] = idx
+        save_state()
         await call.message.edit_text(
             setup_pages[idx],
             reply_markup=make_nav_kb("setup", idx),
@@ -813,7 +916,8 @@ async def setup_nav(call: CallbackQuery):
         return
 
     if data == "open_getid:0":
-        s["instr_page"] = 0
+        nb["instr_page"] = 0
+        save_state()
         await call.message.edit_text(
             get_id_pages[0],
             reply_markup=make_nav_kb("getid", 0),
@@ -828,7 +932,8 @@ async def setup_nav(call: CallbackQuery):
     elif kind == "setup_prev":
         idx = max(idx - 1, 0)
 
-    s["instr_page"] = idx
+    nb["instr_page"] = idx
+    save_state()
     await call.message.edit_text(
         setup_pages[idx],
         reply_markup=make_nav_kb("setup", idx),
@@ -836,11 +941,10 @@ async def setup_nav(call: CallbackQuery):
     )
 
 
-# navigation callbacks for get_id pages
 @dp.callback_query(F.data.startswith(("getid_next:", "getid_prev:")))
 async def getid_nav(call: CallbackQuery):
-    user = str(call.from_user.id)
-    s = state.setdefault(user, {"step": 2, "verified": False, "instr_page": 0})
+    uid = call.from_user.id
+    nb = ensure_draft(uid, reset=False)
 
     kind, raw = call.data.split(":", 1)
     idx = int(raw)
@@ -849,29 +953,37 @@ async def getid_nav(call: CallbackQuery):
     elif kind == "getid_prev":
         idx = max(idx - 1, 0)
 
-    s["instr_page"] = idx
+    nb["instr_page"] = idx
+    save_state()
     await call.message.edit_text(
         get_id_pages[idx],
         reply_markup=make_nav_kb("getid", idx),
         parse_mode=ParseMode.HTML
     )
 
+
 # ---------------- Receive GROUP ID from user (private chat) ----------------
 @dp.message(F.chat.type == "private")
 async def private_msg_handler(msg: Message):
-    user = str(msg.from_user.id)
-    s = state.setdefault(user, {"step": 1, "verified": False})
+    uid = msg.from_user.id
+    bots = bots_of(uid)
+    nb = bots.get(DRAFT_BOT_KEY)
+    if not nb:
+        return
+
     text = (msg.text or "").strip()
-    
-    if s.get("step") == 2:
+
+    if nb.get("step") == 2:
         try:
             gid = int(text)
         except:
-            await msg.answer("Please paste the numeric GROUP ID (e.g. -1001234567890) or use the setup buttons to learn how to get it.")
+            await msg.answer(
+                "Please paste the numeric GROUP ID (e.g. -1001234567890) or use the setup buttons to learn how to get it."
+            )
             return
 
-        s["pending_group_id"] = gid
-        s["step"] = 3
+        nb["pending_group_id"] = gid
+        nb["step"] = 3
         save_state()
         await msg.answer(
             f"✅ Group ID saved: <code>{html.escape(str(gid))}</code>\n\n"
@@ -882,10 +994,11 @@ async def private_msg_handler(msg: Message):
         )
         return
 
+
 # -- Group messages handler (bot API) --
 @dp.message(
-            F.chat.type.in_({"group", "supergroup"}),
-            F.content_type == ContentType.TEXT
+    F.chat.type.in_({"group", "supergroup"}),
+    F.content_type == ContentType.TEXT
 )
 async def group_handler(msg: Message):
     chat_id = msg.chat.id
@@ -896,35 +1009,39 @@ async def group_handler(msg: Message):
     text = (msg.text or "").strip()
 
     for user_id, s in list(state.items()):
+        ensure_user(user_id)
+        bots = s.get("bots") or {}
 
-        if s.get("step") < 3: continue
+        nb = bots.get(DRAFT_BOT_KEY)
+        if nb:
+            step = int(nb.get("step", 0))
+            pending_gid = int(nb.get("pending_group_id", 0) or 0)
 
-        if s.get("step") == 3 and int(s.get("pending_group_id", 0)) == int(chat_id):
-            if text == "/connect":
-                #code = "".join(random.choice(string.digits) for _ in range(8))
-                #s["verify_code"] = code
-                s["step"] = 4
-                save_state()
-                await msg.reply(
-                    "✅ <b>K-Defender received /connect</b>\n\n"
-                    "Now send: <code>/connect_bot BOT_ID @bot_username</code>.\n"
-                    "Can get them using /get_info command in the group (just reply with it to bot's message).\n"
-                    "IMPORTANT: bot's message must be sent in <b>same</b> group where you message K-Defender with /get_info."
-                    f"To send message from bot use: <code>https://api.telegram.org/botTOKEN/sendMessage?chat_id={html.escape(str(chat_id))}&text=test%20message</code>\n"
-                )
-            continue
+            if step == 3 and pending_gid and int(pending_gid) == int(chat_id):
+                if text == "/connect":
+                    nb["step"] = 4
+                    save_state()
+                    await msg.reply(
+                        "✅ <b>K-Defender received /connect</b>\n\n"
+                        "Now send: <code>/connect_bot BOT_ID @bot_username</code>.\n"
+                        "Can get them by adding the bot (that will be protected) to the same group (K-Defender will automatically give needed info about it).\n",
+                        parse_mode=ParseMode.HTML
+                    )
+                continue
 
-        elif s.get("step") == 4:
-            if text.strip().startswith(f"/connect_bot"):
-
+            if step == 4 and text.startswith("/connect_bot"):
                 del_cmd = text[len("/connect_bot"):].strip()
                 parts = del_cmd.split()
                 if len(parts) < 2:
                     await msg.reply("❗ Format: <code>/connect_bot BOT_ID @bot_username</code>", parse_mode=ParseMode.HTML)
                     continue
+
                 bot_id, bot_username = parts[0], parts[1]
                 if not bot_username.startswith("@"):
-                    await msg.reply(f"❗ Bot username '{html.escape(bot_username)}' must be like: @Username_bot!", parse_mode=ParseMode.HTML)
+                    await msg.reply(
+                        f"❗ Bot username '{html.escape(bot_username)}' must be like: @Username_bot!",
+                        parse_mode=ParseMode.HTML
+                    )
                     continue
 
                 try:
@@ -933,28 +1050,44 @@ async def group_handler(msg: Message):
                     await msg.reply(f"❗ Bot_id '{html.escape(bot_id)}' must be a number!", parse_mode=ParseMode.HTML)
                     continue
 
-                bot_username = bot_username[1:]  # without @
+                bot_username_clean = bot_username[1:]  # without @
 
-                s["verified"] = True
-                s["step"] = 5
-                if not "bots" in s:
-                    s["bots"] = {}
-                if str(bot_id) not in s["bots"]:
-                        s["bots"][str(bot_id)] = {}
-                else:
+                if str(bot_id_int) in bots and str(bot_id_int) != DRAFT_BOT_KEY:
                     await bot.send_message(
                         int(user_id),
-                        f"❗ Someone is trying to reconnect bot '{bot_username}'({bot_id}) in chat '{chat_id}'"
+                        f"❗ Someone is trying to reconnect bot '{bot_username_clean}'({bot_id_int}) in chat '{chat_id}'"
                     )
+                    continue
 
-                bot_st = s["bots"][str(bot_id)]
+                bot_st = ensure_bot(user_id, bot_id_int)
 
                 bot_st["group_id"] = int(chat_id)
-                s.pop("pending_group_id", None)
+                bot_st["bot_username"] = bot_username_clean
 
-                bot_st["bot_username"] = bot_username
-                token = generate_bot_token(bot_st['bot_username'])
+                token = generate_bot_token(bot_username_clean)
                 bot_st["bot_token"] = token
+
+                bot_st["step"] = 5
+                bot_st["verified"] = True
+                bot_st["instr_page"] = int(nb.get("instr_page", 1))
+
+                if isinstance(nb.get("settings"), dict) and nb["settings"]:
+                    bot_st.setdefault("settings", {})
+                    for k, v in nb["settings"].items():
+                        bot_st["settings"][k] = v
+
+                # cleanup draft
+                bots.pop(DRAFT_BOT_KEY, None)
+
+                pages = build_protected_bot_pages(
+                    group_id=chat_id,
+                    chat_token=token,
+                    kdefender_id=k_defender_id,
+                    protected_username=bot_st["bot_username"]
+                )
+                bot_st["protected_wizard"] = {"index": 0, "pages": pages}
+
+                save_state()
 
                 await msg.reply(
                     f"🎉 <b>Connection successful!</b> 🎉\n"
@@ -966,128 +1099,121 @@ async def group_handler(msg: Message):
 
                 owner_id = int(user_id)
 
-                pages = build_protected_bot_pages(
-                    group_id=chat_id,
-                    chat_token=token,
-                    kdefender_id=k_defender_id,
-                    protected_username=bot_st["bot_username"]
-                )
-
-                state[str(owner_id)].setdefault("protected_wizard", {})
-                state[str(owner_id)]["protected_wizard"] = {
-                    "index": 0,
-                    "pages": pages
-                }
-                save_state()
-
                 await bot.send_message(
                     owner_id,
                     pages[0],
                     parse_mode=ParseMode.HTML,
-                    reply_markup=make_protected_wiz_kb(0, len(pages)),
+                    reply_markup=make_protected_wiz_kb(bot_id_int, 0, len(pages)),
                     disable_web_page_preview=True
                 )
+                continue
+
+        # ---- PAYLOAD CHECK: "bot_id | text | token" ----
+        if '|' not in text:
+            continue
+
+        arr = text.split('|')
+        if len(arr) < 3:
+            continue
+
+        bot_id_str = arr[0].strip()
+        payload_token = arr[-1].strip()
+        message_text = '|'.join(arr[1:-1]).strip()
+
+        user_bot = bots.get(str(bot_id_str))
+        if not user_bot or str(bot_id_str) == DRAFT_BOT_KEY:
+            continue
+
+        if not user_bot.get("verified", False):
+            continue
+
+        if int(user_bot.get("group_id", 0) or 0) != int(chat_id):
+            continue
+
+        real_token = user_bot.get("bot_token")
+
+        if not payload_token:
+            await msg.reply("⚠ No token provided! ⚠")
             return
 
-        elif s.get("verified") and '|' in text:
+        if payload_token != real_token:
+            message = f"⚠ INVALID TOKEN attempt (got={payload_token}) ⚠"
+            await msg.reply(message)
+            await bot.send_message(int(user_id), message)
+            user_bot.setdefault("logs", []).append(message)
+            user_bot["stats_blocked"] = user_bot.get("stats_blocked", 0) + 1
+            user_bot["stats_total"] = user_bot.get("stats_total", 0) + 1
+            save_state()
+            return
 
-            bot_id, message_text, payload_token = "", "", ""
-            if len(text.split('|')) > 3:
-                #await msg.reply("⚠ Please send message with 3 parts: bot_id, text, token ⚠")
-                arr = text.split('|')
-                bot_id, message_text, payload_token = arr[0], '|'.join(arr[1:-2]), arr[-1]
-            else:
-                bot_id, message_text, payload_token = text.split('|')
-            bot_id, message_text, payload_token = bot_id.strip(), message_text.strip(), payload_token.strip()
+        normal = normalize_input(message_text)
 
-            if bot_id in s["bots"]:
-                
-                user_bot = s["bots"][str(bot_id)]
+        user_st = get_user_settings(int(user_id))
+        bot_st_settings = get_bot_settings(int(user_id), str(bot_id_str))
 
-                real_token = user_bot.get("bot_token")
+        threshold = 30 if user_st["strict"] else 50
+        check_msg = True
 
-                # ---------------- TOKEN CHECK ----------------
-                if not payload_token:
-                    await msg.reply("⚠ No token provided! ⚠")
-                    return
+        if not user_st["enabled"]:
+            check_msg = False
+            score = 0
+            reason_str = "Protection disabled"
+            result_json = {"result": "ok"}
 
-                if payload_token != real_token:
-                    message = f"⚠ INVALID TOKEN attempt (got={payload_token}) ⚠"
-                    await msg.reply(message)
-                    await bot.send_message(int(user_id), message)
-                    user_bot.setdefault("logs", []).append(message)
-                    user_bot["stats_blocked"] = user_bot.get("stats_blocked", 0) + 1
-                    user_bot["stats_total"] = user_bot.get("stats_total", 0) + 1
-                    return
-                # ---------------------------------------------
-                
-                normal = normalize_input(message_text)
+        if user_st["mode"] == "allow_all":
+            check_msg = False
+            score = 0
+            reason_str = "All messages are allowed"
+            result_json = {"result": "ok"}
 
-                user_st = get_user_settings(user_id)
-                bot_st = get_bot_settings(user_id, str(bot_id))
+        if user_st["mode"] == "block_all":
+            check_msg = False
+            score = 100
+            reason_str = "All messages are blocked"
+            result_json = {"result": "blocked"}
 
-                threshold = 30 if user_st["strict"] else 50
-                check_msg = True
+        global DEFAULT_BOT_SETTINGS
+        botname = user_bot.get("bot_username", "unknown")
+        settings = user_bot.setdefault("settings", {})
+        for k, v in DEFAULT_BOT_SETTINGS.items():
+            settings.setdefault(k, v)
 
-                if not user_st["enabled"]:
-                    check_msg = False
-                    score = 0
-                    reason_str = "Protection disabled"
-                    result_json = {"result": "ok"}
+        if check_msg:
+            inj_report_arr = {}
+            for inj in settings.keys():
+                inj_report_arr[inj] = detect_inj(normal, inj, s, str(bot_id_str))
 
-                if user_st["mode"] == "allow_all":
-                    check_msg = False
-                    score = 0
-                    reason_str = "All messages are allowed"
-                    result_json = {"result": "ok"}
+            for inj in settings.keys():
+                if not settings[inj]:
+                    inj_report_arr[inj] = False
 
-                if user_st["mode"] == "block_all":
-                    check_msg = False
-                    score = 100
-                    reason_str = "All messages are blocked"
-                    result_json = {"result": "blocked"}
+            score = get_risk_score(inj_report_arr)
+            result_json = {"result": "ok"} if score < threshold else {"result": "blocked"}
+            reason = [inj for inj, hit in inj_report_arr.items() if hit]
+            reason_str = ", ".join(reason)
 
-                
-                global DEFAULT_BOT_SETTINGS
-                botname = user_bot.get("bot_username", "unknown")
-                settings = user_bot.setdefault("settings", DEFAULT_BOT_SETTINGS)
+        # logs
+        global logs_num_save
+        user_bot.setdefault("logs", []).append(f"{message_text}|{normal}|{score}|{reason_str}")
+        user_bot["logs"] = user_bot["logs"][-logs_num_save:]
 
-                if check_msg:
-                    inj_report_arr = {}
-                    for inj in settings.keys():
-                        inj_report_arr[inj] = detect_inj(normal, inj, s, str(bot_id))
+        # stats
+        user_bot["stats_total"] = user_bot.get("stats_total", 0) + 1
+        if score >= threshold:
+            user_bot["stats_blocked"] = user_bot.get("stats_blocked", 0) + 1
 
-                    for inj in settings.keys():
-                        if not settings[inj]:
-                            inj_report_arr[inj] = False
+        save_state()
 
-                    score = get_risk_score(inj_report_arr)
-                    result_json = {"result": "ok"} if score < threshold else {"result": "blocked"}
-                    reason = []
-                    for inj in inj_report_arr.keys():
-                        if inj_report_arr[inj]:
-                            reason.append(inj)
-                    reason_str = ", ".join(reason)
+        await msg.answer(json.dumps(result_json))
+        if score >= threshold:
+            await bot.send_message(
+                int(user_id),
+                f"@{botname} ❌ Blocked\n"
+                f"Reason: {reason_str}\nMessage: <code>{html.escape(message_text)}</code>\n"
+                f"Normalized message: <code>{html.escape(normal)}</code>",
+                parse_mode=ParseMode.HTML
+            )
 
-                # ========== Save logs ==========
-                global logs_num_save
-                user_bot.setdefault("logs", []).append(f"{message_text}|{normal}|{score}|{reason_str}")
-                user_bot["logs"] = user_bot["logs"][-logs_num_save:]
-
-                # ========== Stats ==========
-                user_bot["stats_total"] = user_bot.get("stats_total", 0) + 1
-                
-                if score >= threshold:
-                    user_bot["stats_blocked"] = user_bot.get("stats_blocked", 0) + 1
-
-                await msg.answer(json.dumps(result_json))
-                if score >= threshold:
-                    await bot.send_message(
-                        int(user_id),
-                        f"@{botname} ❌ Blocked\n"
-                        f"Reason: {reason_str}\nMessage: <code>{html.escape(message_text)}</code>\nNormalized message: <code>{html.escape(normal)}</code>",
-                        parse_mode=ParseMode.HTML
-                    )
 
 def build_protected_bot_pages(group_id: int, chat_token: str, kdefender_id: int, protected_username: str):
     return [
@@ -1181,26 +1307,26 @@ def build_protected_bot_pages(group_id: int, chat_token: str, kdefender_id: int,
     ]
 
 
-def make_protected_wiz_kb(index: int, total: int):
+def make_protected_wiz_kb(bot_id: int, index: int, total: int):
     row = []
     if index > 0:
-        row.append(InlineKeyboardButton(text="⬅ Prev", callback_data=f"pw_prev:{index}"))
+        row.append(InlineKeyboardButton(text="⬅ Prev", callback_data=f"pw_prev:{bot_id}:{index}"))
     if index < total - 1:
-        row.append(InlineKeyboardButton(text="Next ➡", callback_data=f"pw_next:{index}"))
+        row.append(InlineKeyboardButton(text="Next ➡", callback_data=f"pw_next:{bot_id}:{index}"))
 
     kb = []
     if row:
         kb.append(row)
-    kb.append([InlineKeyboardButton(text="❌ Close", callback_data="pw_close")])
+    kb.append([InlineKeyboardButton(text="❌ Close", callback_data=f"pw_close:{bot_id}")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-@dp.callback_query(F.data.startswith(("pw_next:", "pw_prev:", "pw_close")))
+@dp.callback_query(F.data.startswith(("pw_next:", "pw_prev:", "pw_close:")))
 async def protected_wizard_nav(call: CallbackQuery):
-    user = str(call.from_user.id)
-    s = state.setdefault(user, {"step": 1, "verified": False})
+    uid = call.from_user.id
+    ensure_user(uid)
 
-    if call.data == "pw_close":
+    if call.data.startswith("pw_close:"):
         try:
             await call.message.delete()
         except Exception:
@@ -1208,26 +1334,33 @@ async def protected_wizard_nav(call: CallbackQuery):
         await call.answer("Closed.")
         return
 
-    # ensure wizard data exists
-    wiz = s.get("protected_wizard")
-    if not wiz:
-        await call.answer("Wizard expired. Re-verify if needed.", show_alert=True)
-        return
-
-    kind, raw = call.data.split(":", 1)
+    # pw_next:<bot_id>:<idx>  / pw_prev:<bot_id>:<idx>
+    kind, bot_id_s, raw = call.data.split(":", 2)
     idx = int(raw)
 
+    b = bots_of(uid).get(str(bot_id_s))
+    if not b or not b.get("protected_wizard"):
+        await call.answer("Wizard expired. Re-connect if needed.", show_alert=True)
+        return
+
+    wiz = b["protected_wizard"]
+    pages = wiz.get("pages") or []
+    if not pages:
+        await call.answer("Wizard empty.", show_alert=True)
+        return
+
     if kind == "pw_next":
-        idx = min(idx + 1, len(wiz["pages"]) - 1)
+        idx = min(idx + 1, len(pages) - 1)
     else:
         idx = max(idx - 1, 0)
 
     wiz["index"] = idx
+    save_state()
 
     await call.message.edit_text(
-        wiz["pages"][idx],
+        pages[idx],
         parse_mode=ParseMode.HTML,
-        reply_markup=make_protected_wiz_kb(idx, len(wiz["pages"])),
+        reply_markup=make_protected_wiz_kb(int(bot_id_s), idx, len(pages)),
         disable_web_page_preview=True
     )
     await call.answer()
@@ -1236,39 +1369,32 @@ async def protected_wizard_nav(call: CallbackQuery):
 def generate_bot_token(bot_username: str):
     random_part = secrets.token_hex(32)
     base = f"{bot_username}:{random_part}"
-
     token = hashlib.sha256(base.encode()).hexdigest()
-
     return token
 
+
 def message_text_token_extract(text: str):
-    # __TOKEN__:<hex>
     if "__TOKEN__:" not in text:
         return None
-
     try:
         return text.split("__TOKEN__:", 1)[1].strip()
     except:
         return None
 
+
 @dp.message(F.new_chat_members)
 async def on_join(msg: types.Message):
-    global state
-    #print(f"New members: {msg.new_chat_members}")
-
     for m in msg.new_chat_members:
         if m.is_bot:
-            await msg.answer("New bot joined.\n"
-                             f"""<b>Bot Info</b>
+            await msg.answer(
+                "New bot joined.\n"
+                f"""<b>Bot Info</b>
  ├ id: <code>{m.id}</code>
  ├ username: {f'@{m.username}' if m.username else 'N/A'}
  ├ first_name: {m.first_name or 'N/A'}
  └ last_name: {m.last_name or 'N/A'}"""
-        )
-            
-#@dp.message()
-#async def any_msg(msg: types.Message):
-#    print("GOT MESSAGE:", msg.chat.id, msg.content_type, "service:", bool(msg.new_chat_members))
+            )
+
 
 # ============================================================
 # ======================= MAIN ===============================
