@@ -98,11 +98,13 @@ K-Defender предназначен для:
 K-Defender
 ├── .env
 ├── k-defender.py
+├── kdefender_wrapper_local.py
 ├── normalization.py
 ├── signatures.json
-├── state.json
 └── str_session.py
 ```
+Файл `state.json` будет создан автоматически. 
+
 ---
 
 ## 6. Быстрый старт
