@@ -1055,7 +1055,7 @@ async def group_handler(msg: Message):
                 if str(bot_id_int) in bots and str(bot_id_int) != DRAFT_BOT_KEY:
                     await bot.send_message(
                         int(user_id),
-                        f"❗ Someone is trying to reconnect bot '{bot_username_clean}'({bot_id_int}) in chat '{chat_id}'"
+                        f"❗ User/bot {msg.from_user.username} is trying to reconnect bot '{bot_username_clean}'({bot_id_int}) in chat '{chat_id}'"
                     )
                     continue
 
