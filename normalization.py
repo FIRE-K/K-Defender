@@ -106,7 +106,7 @@ def normalize_input(
     if len(s) > max_len:
         s = s[:max_len]
         original_for_b64 = original_for_b64[:max_len]
-        print("Ограничение длины:", s)
+        #print("Ограничение длины:", s)
 
     if nfkc:
         s = unicodedata.normalize("NFKC", s)
@@ -116,14 +116,14 @@ def normalize_input(
         before = s
 
         s = _try_url_decode(s, rounds=url_decode_rounds)
-        print("URL-декодирование:", s)
+        #print("URL-декодирование:", s)
 
         s = _try_html_unescape(s, rounds=html_unescape_rounds)
-        print("HTML entity unescape:", s)
+        #print("HTML entity unescape:", s)
 
         if unicode_escapes:
             s = _try_unicode_escapes(s)
-            print("Unicode-декодирование:", s)
+            #print("Unicode-декодирование:", s)
 
         if s == before:
             break
@@ -132,19 +132,19 @@ def normalize_input(
         s2 = _ZERO_WIDTH_RE.sub("", s)
         if s2 != s:
             s = s2
-        print("Zero-width:", s)
+        #print("Zero-width:", s)
 
     if strip_controls:
         s2 = _CTRL_RE.sub("", s)
         if s2 != s:
             s = s2
-        print("Удаление управляющих символов:", s)
+        #print("Удаление управляющих символов:", s)
 
     if collapse_whitespace:
         s2 = _WS_RE.sub(" ", s).strip()
         if s2 != s:
             s = s2
-        print("Удаление пробельных последовательностей:", s)
+        #print("Удаление пробельных последовательностей:", s)
 
     if base64_decode:
         tok = original_for_b64.strip()
@@ -168,7 +168,7 @@ def normalize_input(
                 if decoded:
                     printable = sum(ch.isprintable() for ch in decoded)
                     if printable / max(1, len(decoded)) >= 0.75:
-                        print("Base64 декодирование:", s)
+                        #print("Base64 декодирование:", s)
                         decoded_norm = normalize_input(
                             decoded,
                             lowercase=lowercase,
@@ -192,6 +192,6 @@ def normalize_input(
 
     if len(s) > max_len:
         s = s[:max_len]
-        print("Ограничение длины:", s)
+        #print("Ограничение длины:", s)
 
     return s
