@@ -1,14 +1,12 @@
-import asyncio, random, string, os, time, json, html, secrets, hashlib
+import asyncio, random, string, os, time, json, html, secrets, hashlib, sys
 from typing import Any, Dict
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from aiogram.enums import ParseMode, ContentType
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
-
-from telethon import TelegramClient, events
-from telethon.sessions import StringSession
+from aiogram.exceptions import TelegramBadRequest
 
 from normalization import normalize_input
 
@@ -42,7 +40,9 @@ def _atomic_write_json(path: str, data: Any) -> None:
 
 def load_json(path: str, default: Any) -> Any:
     if not os.path.exists(path):
-        return default
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"{default}")
+            return default
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -79,7 +79,7 @@ DEFAULT_BOT_SETTINGS = {
 def get_bot_settings(user_id: int, bot_id: int) -> dict:
     u = state.setdefault(str(user_id), {})
     bots = u.setdefault("bots", {})
-    b = bots.setdefault(str(bot_id), {})   # IMPORTANT: bot_id key is string in JSON
+    b = bots.setdefault(str(bot_id), {})
     st = b.setdefault("settings", {})
     for k, v in DEFAULT_BOT_SETTINGS.items():
         st.setdefault(k, v)
@@ -126,44 +126,27 @@ def reset_bot_token(user_id: int, bot_id: int) -> str:
 #   }
 # }
 
-'''def calculate_dynamic_scores(signatures_dict):
-    """Calculate scores based on number of signatures in each category"""
-    scores = {}
-    
-    for category, patterns in signatures_dict.items():
-        # Base score + weight based on number of patterns
-        base_score = 50  # Medium risk by default
-        pattern_weight = len(patterns) * 2  # Each pattern adds 2 points
-        
-        if category == "SQLi" or category == "XSS":
-            base_score = 100  # Critical
-        elif "injection" in category.lower():
-            base_score = 70   # High
-        elif "Flood" in category:
-            base_score = 20   # Behavioral
-        
-        scores[category] = min(100, base_score + pattern_weight)
-    
-    # Ensure Flood exists
-    if "Flood" not in scores:
-        scores["Flood"] = 20
-    
-    return scores'''
-
-# scores = calculate_dynamic_scores(signatures)
-
-# ---------------- MTProto Userbot ----------------
-API_ID = int(os.getenv("API_ID") or 0)
-API_HASH = os.getenv("API_HASH")
-SESSION = os.getenv("TELETHON_SESSION")  # user must save here their string session
-mt_client = TelegramClient(StringSession(SESSION) if SESSION else None, API_ID, API_HASH) if API_ID and API_HASH and SESSION else None
-
 # ---------------- SECURITY FUNCTIONS ----------------
 def detect_inj(text, inj, user_state, sender):
     global signatures
     if inj == "Flood":
         return detect_flood(user_state, sender)
-    return any(x in text.lower() for x in signatures[inj]["patterns"])
+    sig = signatures.get(inj)
+    if not sig:
+        return False
+    return any(x in text.lower() for x in sig.get("patterns", []))
+
+def get_risk_score(inj_arr):
+    global signatures
+    score = 0
+    for inj, hit in inj_arr.items():
+        if not hit:
+            continue
+        sig = signatures.get(inj)
+        if not sig:
+            continue
+        score += int(sig.get("risk", 0))
+    return score
 
 def detect_flood(user_state, sender):
     t = time.time()
@@ -174,25 +157,18 @@ def detect_flood(user_state, sender):
     logs[sender].append(t)
     return len(logs[sender]) > 5
 
-def get_risk_score(inj_arr):
-    global signatures
-    score = 0
-    for inj in inj_arr:
-        if inj_arr[inj]: score += signatures[inj]["risk"]
-    return score
-
 # ---------------- Instruction pages ----------------
 setup_pages = [
     "<b>K-Defender Setup — Step 1</b>\n\nCreate a private group in Telegram. Name it something like \"K-Defender Security\".",
     "<b>K-Defender Setup — Step 2</b>\n\nAdd the K-Defender bot to the group (search @kdefender_bot) and also add the bot you want to protect to the same group.",
     "<b>K-Defender Setup — Step 3</b>\n\nSet your protected bot's permissions: allow it to read messages in the group (Admin → Edit Permissions → Read Messages).",
     "<b>K-Defender Setup — Step 4</b>\n\nSend the GROUP ID to me (paste the numeric ID here), or press \"Detect automatically\" in the group later.\n\nIf you don't know how to get the GROUP ID, press the \"How to get group ID\" button.",
-    "<b>K-Defender Setup — Step 5</b>\n\nAfter we have the GROUP ID: go to your protected bot and send in the group: <code>/connect</code>\nK-Defender will then produce a verification code the protected bot must send back as <code>/verify CODE</code>."
+    "<b>K-Defender Setup — Step 5</b>\n\nAfter we have the GROUP ID: go to your protected bot and send in the group: <code>/connect</code>."
 ]
 
 get_id_pages = [
     "<b>How to get Group ID — Step 1</b>\n\nOpen the group (on desktop or mobile).",
-    "<b>How to get Group ID — Step 2</b>\n\nUse this bot (add it to group --&gt; write /get_info to it and it'll give chat info).",
+    "<b>How to get Group ID — Step 2</b>\n\nUse this bot (add it to group --&gt; write <code>/get_info</code> to it and it'll give chat info).",
     "<b>How to get Group ID — Step 3</b>\n\nYou can use @getidsbot instead (add it to group --&gt; it'll give group info. After getting Group ID you can delete this bot).",
     "<b>How to get Group ID — Final</b>\n\nGroup IDs for supergroups are usually negative numbers (e.g. -1001234567890). Paste that exact numeric ID to me."
 ]
@@ -437,22 +413,34 @@ async def settings_click(call: CallbackQuery):
     await call.answer("Saved ✅")
 
 @dp.message(Command("get_info"))
-async def get_info_cmd_handler(msg: Message):
+async def get_info_cmd(msg: types.Message):
+    if msg.reply_to_message:
+        u = msg.reply_to_message.from_user
+        await msg.answer(
+            f"""<code>Info</code>
+<b>User / Bot</b>
+ ├ id: <code>{u.id}</code>
+ ├ username: {f'@{u.username}' if u.username else 'N/A'}
+ ├ first_name: {u.first_name or 'N/A'}
+ ├ last_name: {u.last_name or 'N/A'}
+ └ is_bot: {u.is_bot}"""
+        )
+        return
+
+    c = msg.chat
     await msg.answer(
         f"""<code>Info</code>
 <b>This Chat</b>
- ├ id: <code>{msg.chat.id}</code>
- ├ title: {msg.chat.title}
- ├ type: {msg.chat.type}
- └ created at: {msg.chat.created_at if msg.chat.type == "group" else "Not found"}"""
-        #reply_markup=kb
+ ├ id: <code>{c.id}</code>
+ ├ title: {c.title or 'N/A'}
+ └ type: {c.type}"""
     )
 
 @dp.callback_query(F.data == "bots_info")
 async def bots_info(call: CallbackQuery):
     global state
     btn_arr = []
-    for bot_id, data in state[str(call.from_user.id)]["bots"].items():
+    for bot_id, data in state.get(str(call.from_user.id), {}).get("bots", {}).items():
         btn_arr.append(
             InlineKeyboardButton(
                 text=f"@{data['bot_username']}",
@@ -465,8 +453,10 @@ async def bots_info(call: CallbackQuery):
         [InlineKeyboardButton(text="Add Bot", callback_data="bind_start")],
         [InlineKeyboardButton(text="⬅ Back", callback_data="menu")]
     ])
+    message = '\nNo bots connected. Add one by pressing the button below.' if btn_arr == [] else ''
+
     await call.message.edit_text(
-        "<code>Bots Info</code>",
+        f"<code>Bots Info</code>{message}",
         reply_markup=kb
     )
 
@@ -600,6 +590,15 @@ async def bot_stats_handler(call: CallbackQuery):
     )
     await call.answer()
 
+def delete_bot(user_id, bot_id):
+    u = state.get(str(user_id))
+    if not u:
+        return False
+    bots = u.get("bots", {})
+    bots.pop(str(bot_id), None)
+    save_state()
+    return True
+
 async def show_bot_panel(msg, bot_state, bot_id):
     global DEFAULT_BOT_SETTINGS
     bot_username = bot_state.get("bot_username")
@@ -643,6 +642,13 @@ async def show_bot_panel(msg, bot_state, bot_id):
 
     inj_arr.append([
         InlineKeyboardButton(
+            text="🗑 Delete bot",
+            callback_data=f"botdelete_{bot_id}|{bot_username}"
+        )
+    ])
+
+    inj_arr.append([
+        InlineKeyboardButton(
             text="⬅ Back",
             callback_data="bots_info"
         )
@@ -660,7 +666,7 @@ async def bot_reset_token_confirm(call: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="✅ Yes, reset", callback_data=f"botresettokenyes_{bot_id}|{bot_username}"),
-            InlineKeyboardButton(text="❌ Cancel", callback_data=f"bot_{bot_id}")
+            InlineKeyboardButton(text="❌ Cancel", callback_data=f"bot_{bot_username}")
         ]
     ])
 
@@ -704,6 +710,52 @@ async def bot_reset_token_apply(call: CallbackQuery):
     )
     await call.answer("Token reset")
 
+@dp.callback_query(F.data.startswith("botdelete_"))
+async def bot_reset_token_confirm(call: CallbackQuery):
+    bot_info = ''.join(call.data.split("_", 1)[1])
+    bot_id = bot_info.split("|", 1)[0]
+    bot_username = bot_info.split("|", 1)[1]
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Yes, delete", callback_data=f"botdeleteyes_{bot_id}|{bot_username}"),
+            InlineKeyboardButton(text="❌ Cancel", callback_data=f"bot_{bot_username}")
+        ]
+    ])
+
+    await call.message.edit_text(
+        "<b>🗑 Delete bot?</b>\n\n"
+        "This will immediately delete this bot from protection.\n\n"
+        "Rewrite (delete <code>setup()</code> and <code>close()</code> lines and wrappers -- <code>@kdefender_check()</code>) and restart your bot.\nK-Defender protection will be deleted for it.\n"
+        "Are you sure?",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("botdeleteyes_"))
+async def bot_reset_token_apply(call: CallbackQuery):
+    user_id = call.from_user.id
+    bot_info = ''.join(call.data.split("_", 1)[1])
+    bot_id = bot_info.split("|", 1)[0]
+    bot_username = bot_info.split("|", 1)[1]
+
+    try:
+        delete_bot(user_id, bot_id)
+    except Exception:
+        await call.answer("Failed to delete bot", show_alert=True)
+        return
+
+    await call.message.edit_text(
+        "<b>✅ Bot deleted successfully</b>\n\n"
+        "Again, rewrite and restart your bot.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅ Back", callback_data=f"bots_info")]
+        ])
+    )
+    await call.answer("Bot deleted")
+
 @dp.callback_query(F.data.startswith("bot_"))
 async def bot_info(call: CallbackQuery):
     bot_username = '_'.join(call.data.split("_")[1:])
@@ -727,6 +779,8 @@ async def bind_start(call: CallbackQuery):
     s = state.setdefault(user, {"step": 1, "verified": False, "instr_page": 0})
     s["step"] = 2
     s["instr_page"] = 0
+    s["verified"] = False
+    save_state()
     await call.message.edit_text(
         setup_pages[0],
         reply_markup=make_nav_kb("setup", 0),
@@ -816,53 +870,224 @@ async def private_msg_handler(msg: Message):
             await msg.answer("Please paste the numeric GROUP ID (e.g. -1001234567890) or use the setup buttons to learn how to get it.")
             return
 
-        s["group_id"] = gid
+        s["pending_group_id"] = gid
         s["step"] = 3
+        save_state()
         await msg.answer(
             f"✅ Group ID saved: <code>{html.escape(str(gid))}</code>\n\n"
-            "Now, in that group, have your protected bot send the following command:\n\n"
+            "Now, in that group, send the following command:\n\n"
             "<code>/connect</code>\n\n"
-            "When K-Defender sees <code>/connect</code> in that group, it will reply with the next verification steps.",
+            "When K-Defender sees <code>/connect</code> in that group, it will reply with the next steps.",
             parse_mode=ParseMode.HTML
         )
         return
 
-    if text.lower() in ("/help", "help"):
-        await msg.answer("Use /start in chat with K-Defender to begin binding your bot to K-Defender.")
-        return
-
 # -- Group messages handler (bot API) --
-@dp.message(F.chat.type.in_({"group", "supergroup"}))
+@dp.message(
+            F.chat.type.in_({"group", "supergroup"}),
+            F.content_type == ContentType.TEXT
+)
 async def group_handler(msg: Message):
     chat_id = msg.chat.id
     me = await bot.get_me()
-    # ignore messages from K-Defender itself
-    if msg.from_user and msg.from_user.id == me.id:
+    if msg.from_user.id == me.id:
         return
 
     text = (msg.text or "").strip()
 
     for user_id, s in list(state.items()):
-        if s.get("group_id") != chat_id:
-            continue
 
-        if s.get("step") == 3:
+        if s.get("step") < 3: continue
+
+        if s.get("step") == 3 and int(s.get("pending_group_id", 0)) == int(chat_id):
             if text == "/connect":
-                code = "".join(random.choice(string.digits) for _ in range(8))
-                s["verify_code"] = code
+                #code = "".join(random.choice(string.digits) for _ in range(8))
+                #s["verify_code"] = code
                 s["step"] = 4
+                save_state()
                 await msg.reply(
                     "✅ <b>K-Defender received /connect</b>\n\n"
-                    f"Verification code: <code>{code}</code>\n\n"
-                    "Your protected bot must now send in this group:\n"
-                    f"<code>/verify {code}</code>\n\n"
-                    "Alternatively, from your protected bot's server you can call the API:\n"
-                    f"<code>https://api.telegram.org/botTOKEN/sendMessage?chat_id={html.escape(str(chat_id))}&text=/verify%20{code}</code>\n"
-                    "Replace TOKEN with your protected bot's token if you want to send the verify command programmatically."
+                    "Now send: <code>/connect_bot BOT_ID @bot_username</code>.\n"
+                    "Can get them using /get_info command in the group (just reply with it to bot's message).\n"
+                    "IMPORTANT: bot's message must be sent in <b>same</b> group where you message K-Defender with /get_info."
+                    f"To send message from bot use: <code>https://api.telegram.org/botTOKEN/sendMessage?chat_id={html.escape(str(chat_id))}&text=test%20message</code>\n"
                 )
-                return
+            continue
+
+        elif s.get("step") == 4:
+            if text.strip().startswith(f"/connect_bot"):
+
+                del_cmd = text[len("/connect_bot"):].strip()
+                parts = del_cmd.split()
+                if len(parts) < 2:
+                    await msg.reply("❗ Format: <code>/connect_bot BOT_ID @bot_username</code>", parse_mode=ParseMode.HTML)
+                    continue
+                bot_id, bot_username = parts[0], parts[1]
+                if not bot_username.startswith("@"):
+                    await msg.reply(f"❗ Bot username '{html.escape(bot_username)}' must be like: @Username_bot!", parse_mode=ParseMode.HTML)
+                    continue
+
+                try:
+                    bot_id_int = int(bot_id)
+                except ValueError:
+                    await msg.reply(f"❗ Bot_id '{html.escape(bot_id)}' must be a number!", parse_mode=ParseMode.HTML)
+                    continue
+
+                bot_username = bot_username[1:]  # without @
+
+                s["verified"] = True
+                s["step"] = 5
+                if not "bots" in s:
+                    s["bots"] = {}
+                if str(bot_id) not in s["bots"]:
+                        s["bots"][str(bot_id)] = {}
+                else:
+                    await bot.send_message(
+                        int(user_id),
+                        f"❗ Someone is trying to reconnect bot '{bot_username}'({bot_id}) in chat '{chat_id}'"
+                    )
+
+                bot_st = s["bots"][str(bot_id)]
+
+                bot_st["group_id"] = int(chat_id)
+                s.pop("pending_group_id", None)
+
+                bot_st["bot_username"] = bot_username
+                token = generate_bot_token(bot_st['bot_username'])
+                bot_st["bot_token"] = token
+
+                await msg.reply(
+                    f"🎉 <b>Connection successful!</b> 🎉\n"
+                    f"Protected bot: <code>@{bot_st['bot_username']}</code>\n"
+                    f"Token for sending messages: <code>{token}</code>\n\n"
+                    f"📩 I’m sending setup instructions to the owner in DM.",
+                    parse_mode=ParseMode.HTML
+                )
+
+                owner_id = int(user_id)
+
+                pages = build_protected_bot_pages(
+                    group_id=chat_id,
+                    chat_token=token,
+                    kdefender_id=k_defender_id,
+                    protected_username=bot_st["bot_username"]
+                )
+
+                state[str(owner_id)].setdefault("protected_wizard", {})
+                state[str(owner_id)]["protected_wizard"] = {
+                    "index": 0,
+                    "pages": pages
+                }
+                save_state()
+
+                await bot.send_message(
+                    owner_id,
+                    pages[0],
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=make_protected_wiz_kb(0, len(pages)),
+                    disable_web_page_preview=True
+                )
+            return
+
+        elif s.get("verified") and '|' in text:
+
+            bot_id, message_text, payload_token = "", "", ""
+            if len(text.split('|')) > 3:
+                #await msg.reply("⚠ Please send message with 3 parts: bot_id, text, token ⚠")
+                arr = text.split('|')
+                bot_id, message_text, payload_token = arr[0], '|'.join(arr[1:-2]), arr[-1]
             else:
-                continue
+                bot_id, message_text, payload_token = text.split('|')
+            bot_id, message_text, payload_token = bot_id.strip(), message_text.strip(), payload_token.strip()
+
+            if bot_id in s["bots"]:
+                
+                user_bot = s["bots"][str(bot_id)]
+
+                real_token = user_bot.get("bot_token")
+
+                # ---------------- TOKEN CHECK ----------------
+                if not payload_token:
+                    await msg.reply("⚠ No token provided! ⚠")
+                    return
+
+                if payload_token != real_token:
+                    message = f"⚠ INVALID TOKEN attempt (got={payload_token}) ⚠"
+                    await msg.reply(message)
+                    await bot.send_message(int(user_id), message)
+                    user_bot.setdefault("logs", []).append(message)
+                    user_bot["stats_blocked"] = user_bot.get("stats_blocked", 0) + 1
+                    user_bot["stats_total"] = user_bot.get("stats_total", 0) + 1
+                    return
+                # ---------------------------------------------
+                
+                normal = normalize_input(message_text)
+
+                user_st = get_user_settings(user_id)
+                bot_st = get_bot_settings(user_id, str(bot_id))
+
+                threshold = 30 if user_st["strict"] else 50
+                check_msg = True
+
+                if not user_st["enabled"]:
+                    check_msg = False
+                    score = 0
+                    reason_str = "Protection disabled"
+                    result_json = {"result": "ok"}
+
+                if user_st["mode"] == "allow_all":
+                    check_msg = False
+                    score = 0
+                    reason_str = "All messages are allowed"
+                    result_json = {"result": "ok"}
+
+                if user_st["mode"] == "block_all":
+                    check_msg = False
+                    score = 100
+                    reason_str = "All messages are blocked"
+                    result_json = {"result": "blocked"}
+
+                
+                global DEFAULT_BOT_SETTINGS
+                botname = user_bot.get("bot_username", "unknown")
+                settings = user_bot.setdefault("settings", DEFAULT_BOT_SETTINGS)
+
+                if check_msg:
+                    inj_report_arr = {}
+                    for inj in settings.keys():
+                        inj_report_arr[inj] = detect_inj(normal, inj, s, str(bot_id))
+
+                    for inj in settings.keys():
+                        if not settings[inj]:
+                            inj_report_arr[inj] = False
+
+                    score = get_risk_score(inj_report_arr)
+                    result_json = {"result": "ok"} if score < threshold else {"result": "blocked"}
+                    reason = []
+                    for inj in inj_report_arr.keys():
+                        if inj_report_arr[inj]:
+                            reason.append(inj)
+                    reason_str = ", ".join(reason)
+
+                # ========== Save logs ==========
+                global logs_num_save
+                user_bot.setdefault("logs", []).append(f"{message_text}|{normal}|{score}|{reason_str}")
+                user_bot["logs"] = user_bot["logs"][-logs_num_save:]
+
+                # ========== Stats ==========
+                user_bot["stats_total"] = user_bot.get("stats_total", 0) + 1
+                
+                if score >= threshold:
+                    user_bot["stats_blocked"] = user_bot.get("stats_blocked", 0) + 1
+
+                await msg.answer(json.dumps(result_json))
+                if score >= threshold:
+                    await bot.send_message(
+                        int(user_id),
+                        f"@{botname} ❌ Blocked\n"
+                        f"Reason: {reason_str}\nMessage: <code>{html.escape(message_text)}</code>\nNormalized message: <code>{html.escape(normal)}</code>",
+                        parse_mode=ParseMode.HTML
+                    )
 
 def build_protected_bot_pages(group_id: int, chat_token: str, kdefender_id: int, protected_username: str):
     return [
@@ -876,7 +1101,7 @@ def build_protected_bot_pages(group_id: int, chat_token: str, kdefender_id: int,
             "📦 <b>Step 1 — Install wrapper</b>\n\n"
             "Run in your protected bot project:\n"
             "<pre>pip install kdefender-wrapper telethon</pre>\n\n"
-            "Optional (.env autoload):\n"
+            "Optional (for .env autoload):\n"
             "<pre>pip install python-dotenv</pre>"
         ),
         (
@@ -917,6 +1142,7 @@ def build_protected_bot_pages(group_id: int, chat_token: str, kdefender_id: int,
             "from aiogram import Bot, Dispatcher\n"
             "from aiogram.types import Message\n"
             "from kdefender_wrapper import setup, close, kdefender_check\n\n"
+            "# requires python-dotenv module\n"
             "load_dotenv()\n"
             "TOKEN = os.getenv('TOKEN')  # your bot token\n"
             "bot = Bot(TOKEN)\n"
@@ -948,8 +1174,8 @@ def build_protected_bot_pages(group_id: int, chat_token: str, kdefender_id: int,
             "2) Send normal text → should pass\n"
             "3) Send suspicious payload (SQLi/XSS) → should be blocked\n\n"
             "<b>How it works:</b>\n"
-            "• bot sends message to defender group with <code>__TOKEN__:</code>\n"
-            "• K-Defender replies JSON: <code>{\"result\":\"ok\"}</code> or blocked\n"
+            "• bot sends message to defender group with <code>id | text | token</code> using MTProto\n"
+            "• K-Defender replies JSON: <code>{\"result\":\"ok\"}</code> or <code>{\"result\":\"blocked\"}</code>\n"
             "• wrapper allows/blocks handler execution"
         ),
     ]
@@ -1025,158 +1251,24 @@ def message_text_token_extract(text: str):
     except:
         return None
 
-# ============================================================
-# ================= MTProto HANDLER ==========================
-# ============================================================
-if mt_client:
-    @mt_client.on(events.NewMessage)
-    async def mt_handler(event):
-        chat = event.chat_id
-        sender = event.sender_id
-        text = event.raw_text or ""
+@dp.message(F.new_chat_members)
+async def on_join(msg: types.Message):
+    global state
+    #print(f"New members: {msg.new_chat_members}")
 
-        for user_id, s in list(state.items()):
-            if s.get("group_id") != chat:
-                continue
-
-            # ---------------- VERIFICATION ----------------
-            if s.get("step") == 4:
-                sender_entity = await mt_client.get_entity(sender)
-                # ensure sender is a bot account (protected bot)
-                if getattr(sender_entity, "bot", False):
-                    if text.strip() == f"/verify {s.get('verify_code')}":
-                        s.pop("verify_code")
-                        sender = str(sender)
-                        s["verified"] = True
-                        s["step"] = 5
-                        if not "bots" in s:
-                            s["bots"] = {}
-                        if sender not in s["bots"]:
-                            s["bots"][sender] = {}
-                        s["bots"][sender]["bot_username"] = getattr(sender_entity, "username", "unknown")
-                        # s["bot_id"] = sender
-                        # s["bot_username"] = getattr(sender_entity, "username", "unknown")
-
-                        token = generate_bot_token(s["bots"][sender]['bot_username'])
-                        s["bots"][sender]["bot_token"] = token
-
-                        await bot.send_message(
-                            chat,
-                            f"🎉 <b>Verification successful!</b> 🎉\n"
-                            f"Protected bot: <code>@{s['bots'][sender]['bot_username']}</code>\n"
-                            f"Token for sending messages: <code>{token}</code>\n\n"
-                            f"📩 I’m sending setup instructions to the owner in DM.",
-                            parse_mode=ParseMode.HTML
-                        )
-
-                        # send wizard to OWNER DM (user who started binding)
-                        owner_id = int(user_id)
-
-                        pages = build_protected_bot_pages(
-                            group_id=chat,
-                            chat_token=token,
-                            kdefender_id=k_defender_id,
-                            protected_username=s["bots"][sender]["bot_username"]
-                        )
-
-                        state[str(owner_id)].setdefault("protected_wizard", {})
-                        state[str(owner_id)]["protected_wizard"] = {
-                            "index": 0,
-                            "pages": pages
-                        }
-
-                        await bot.send_message(
-                            owner_id,
-                            pages[0],
-                            parse_mode=ParseMode.HTML,
-                            reply_markup=make_protected_wiz_kb(0, len(pages)),
-                            disable_web_page_preview=True
-                        )
-
-                    elif text.strip().startswith("/verify"):
-                        await bot.send_message(chat,
-                            f"❌ <b>Invalid code!</b> Make sure you copied the code from K-Defender correctly."
-                        )
-                return
-
-            # ---------------- PROTECTION ENGINE ----------------
-            if s.get("verified") and str(sender) in s["bots"]:
-                # ---------------- TOKEN CHECK ----------------
-                payload_token = message_text_token_extract(text)
-
-                user_bot = s["bots"][str(sender)]
-
-                real_token = user_bot.get("bot_token")
-
-                if not real_token:
-                    await bot.send_message(chat, "Bot has no token??")
-                    return
-
-                if payload_token != real_token:
-                    message = f"⚠ INVALID TOKEN attempt (got={payload_token})"
-                    await bot.send_message(
-                        int(user_id),
-                        message,
-                        parse_mode=ParseMode.HTML
-                    )
-                    user_bot.setdefault("logs", []).append(message)
-                    user_bot["stats_blocked"] = user_bot.get("stats_blocked", 0) + 1
-                    user_bot["stats_total"] = user_bot.get("stats_total", 0) + 1
-                    return
-                
-                text = text.split("\n__TOKEN__")[0]
-                normal = normalize_input(text)
-
-                user_st = get_user_settings(user_id)
-                bot_st = get_bot_settings(user_id, str(sender))
-
-                if not user_st["enabled"]:
-                    return True
-
-                if user_st["mode"] == "allow_all":
-                    return True
-                if user_st["mode"] == "block_all":
-                    return False
-                
-                global DEFAULT_BOT_SETTINGS
-                botname = user_bot.get("bot_username", "unknown")
-                settings = user_bot.setdefault("settings", DEFAULT_BOT_SETTINGS)
-                inj_report_arr = {}
-                for inj in settings.keys():
-                    inj_report_arr[inj] = detect_inj(normal, inj, s, str(sender))
-
-                for inj in settings.keys():
-                    if not settings[inj]:
-                        inj_report_arr[inj] = False
-
-                score = get_risk_score(inj_report_arr)
-                threshold = 30 if user_st["strict"] else 50
-                result_json = {"result": "ok"} if score < threshold else {"result": "blocked"}
-                reason = []
-                for inj in inj_report_arr.keys():
-                    if inj_report_arr[inj]:
-                        reason.append(inj)
-                reason_str = ", ".join(reason)
-
-                # ========== Save logs ==========
-                global logs_num_save
-                user_bot.setdefault("logs", []).append(f"{text}|{normal}|{score}|{reason_str}")
-                user_bot["logs"] = user_bot["logs"][-logs_num_save:]
-
-                # ========== Stats ==========
-                user_bot["stats_total"] = user_bot.get("stats_total", 0) + 1
-                
-                if score >= threshold:
-                    user_bot["stats_blocked"] = user_bot.get("stats_blocked", 0) + 1
-
-                await bot.send_message(chat, json.dumps(result_json))
-                if score >= threshold:
-                    await bot.send_message(
-                        int(user_id),
-                        f"@{botname} ❌ Blocked\n"
-                        f"Reason: {reason_str}\nMessage: <code>{html.escape(text)}</code>\nNormalized message: <code>{html.escape(normal)}</code>",
-                        parse_mode=ParseMode.HTML
-                    )
+    for m in msg.new_chat_members:
+        if m.is_bot:
+            await msg.answer("New bot joined.\n"
+                             f"""<b>Bot Info</b>
+ ├ id: <code>{m.id}</code>
+ ├ username: {f'@{m.username}' if m.username else 'N/A'}
+ ├ first_name: {m.first_name or 'N/A'}
+ └ last_name: {m.last_name or 'N/A'}"""
+        )
+            
+#@dp.message()
+#async def any_msg(msg: types.Message):
+#    print("GOT MESSAGE:", msg.chat.id, msg.content_type, "service:", bool(msg.new_chat_members))
 
 # ============================================================
 # ======================= MAIN ===============================
@@ -1188,24 +1280,14 @@ async def main():
     print(f"K-Defender running as @{me.username} ({k_defender_id})")
 
     try:
-        if mt_client:
-            await mt_client.start()
-            print("MTProto started")
-        else:
-            print("MTProto client not configured! Add API_ID, API_HASH, TELETHON_SESSION")
-            os.exit(1)
-
         global _autosave_task
         _autosave_task = asyncio.create_task(autosave_loop())
-        
+
+        await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot, polling_timeout=60)
     finally:
         if _autosave_task:
             _autosave_task.cancel()
-        
-        if mt_client and mt_client.is_connected():
-            await mt_client.disconnect()
-            print("MTProto disconnected")
         await bot.session.close()
 
 
