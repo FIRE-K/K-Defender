@@ -184,7 +184,7 @@ def normalize_input(
                             max_len=max_len,
                             max_passes=max_passes,
                         )
-                        s = f"{s} || {decoded_norm}"
+                        s = decoded_norm # s = f"{s} || {decoded_norm}"
                         
 
     if lowercase:
