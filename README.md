@@ -93,11 +93,15 @@ K-Defender предназначен для:
 ```
 K-Defender
 ├── .env
+├── core.py
 ├── k-defender.py
+├── kdefender_ai.pkl
 ├── kdefender_wrapper_local.py
+├── make_dataset.py
 ├── normalization.py
 ├── signatures.json
-└── str_session.py
+├── train_model.py
+└── web-api.py
 ```
 Файл `state.json` будет создан автоматически. 
 
@@ -125,7 +129,6 @@ Telegram-бот K-Defender используется как главный ком
      ```
      или нажать кнопку Code и выбрать опцию `Скачать ZIP/Download ZIP`, после чего распаковать архив в нужном каталоге
    * указать в .env требуемые данные (TOKEN нужно получить у Bot Father)
-   * Для получения TELETHON_SESSION (требуется ТОЛЬКО для подключаемых ботов) нужно запустить файл `str_session.py` (для запуска требуются API_ID, API_HASH в файле .env)
      ```.env
      TOKEN=<...>
      ```
@@ -150,16 +153,17 @@ from kdefender_wrapper import setup, kdefender_check
 
 await setup(
     bot=bot,
-    api_id=API_ID,
-    api_hash=API_HASH,
-    session=SESSION,
-    group_id=GROUP_ID,
+    url=URL,
     chat_token=CHAT_TOKEN,
-    kdefender_id=K_DEFENDER_ID,
+    lang="ru"
 )
 
 @kdefender_check()
 async def handler(message):
+    await message.answer("✅ Message accepted")
+# OR
+@kdefender_check(param="message")
+async def handler_with_parameter(message):
     await message.answer("✅ Message accepted")
 ```
 
